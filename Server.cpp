@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <cstring>
 #include <sstream>
 #include <fstream>
 #include <bitset>
@@ -9,6 +10,17 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <random>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <vector>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/types.h>
+
+#define PORT_NUMBER 5444
+#define BUFFER_SIZE 1024
 
 using namespace std;
 
@@ -35,22 +47,16 @@ void print() {
 		for (int j = 0; j < cols; j++) {
 
 			//If the current seat is 0, the seat is empty
-			if (gameBoard[i][j] == 0) {
+			if (seats[i][j] == 0) {
 
 				cout << "[ ]";
 
 			//If the current seat is 1, the seat is taken
-			} else if (gameBoard[i][j] == 1) {
+			} else if (seats[i][j] == 1) {
 
 				cout << "[X]";
 
-			//If the server encounters a seat that is not 0 or 1, prints an error and exits
-			} else {
-
-				cout << "An error has occurred. Please try again." << endl;
-				exit(-1);
-
-			}
+			} 
 
 		}
 
@@ -62,52 +68,131 @@ void print() {
 
 }
 
-void* reserveSeat(void* seatID) {
+void* client(void* cID) {
+	
+	int clientSocket = *((int*)cID);
+	free(cID);
 
-	int id = (int)(long)seatID;
-	fflush(stdout);
+	int row = 0;
+	int col = 0;
 
-	while (true) {
+	cout << "Client connected. Socket: " << clientSocket << endl;
+	
+	string size = to_string(rows) + " " + to_string(cols);
 
-		int row;
-		int col;
+	const char* sizes = size.c_str();
 
-		//Requests a row and column for a seat from the client using the id
+	if (write(clientSocket, sizes, strlen(sizes)) < 0) {
+		cout << "Problem sending seating size information to client." << endl;
+		return (void*)1;
+	}
+
+	while (!filled) {
+
+		char buffer[BUFFER_SIZE];
+		memset(buffer, 0, sizeof(buffer));
+
+		if (read(clientSocket, buffer, sizeof(buffer) - 1) < 0) {
+			cout << "Error receiving message from client." << endl;
+			return (void*)1;
+		}
+
+		string message(buffer);
+
+		int number;
+		istringstream iss(message);
+		string command;
+		iss >> command;
+
+		istringstream c1_iss(command);
+
+		if (c1_iss >> number) {
+
+			row = number;
+
+		} else if (command == "exit") {
+
+			break;
+
+		}
+
+		string command2;
+		iss >> command2;
+		int number2;
+
+		istringstream c2_iss(command2);
+
+		if (c2_iss >> number2) {
+
+			col = number2;
+
+		}
 
 		if (row > rows || row < 1) {
 
-			//Return seat does not exist error to client
-			return (void*)0;
+			string er = "I am sorry, that seat does not exist. Please try again.";
+
+			const char* error = er.c_str();
+
+			if (write(clientSocket, error, strlen(error)) < 0) {
+				cout << "Problem sending error message to client." << endl;
+				return (void*)1;
+			}
+
+			continue;
 
 		}
 		else if (col > cols || col < 1) {
 
-			//Return seat does not exist error to client
-			return (void*)0;
+			string er = "I am sorry, that seat does not exist. Please try again.";
+
+			const char* error = er.c_str();
+
+			if (write(clientSocket, error, strlen(error)) < 0) {
+				cout << "Problem sending error message to client." << endl;
+				return (void*)1;
+			}
+
+			continue;
 
 		}
 
 		if (seats[row][col] == 1) {
 
-			//Return seat taken message to client
-			return (void*)0;
+			string er = "I am sorry, that seat is taken exist. Please try again.";
 
-		}
-		else {
+			const char* error = er.c_str();
+
+			if (write(clientSocket, error, strlen(error)) < 0) {
+				cout << "Problem sending error message to client." << std::endl;
+				return (void*)1;
+			}
+
+			continue;
+
+		} else {
 
 			seats[row][col] = 1;
-			//Return seat reserved message to client
+
+			string er = "Your seat has been reserved.";
+
+			const char* error = er.c_str();
+
+			if (write(clientSocket, error, strlen(error)) < 0) {
+				cout << "Problem sending error message to client." << std::endl;
+				return (void*)1;
+			}
+
+			pthread_mutex_lock(&myMutex);
+			print();
+			pthread_mutex_unlock(&myMutex);
+			continue;
 
 		}
-
-		pthread_mutex_lock(&myMutex);
-		print();
-		pthread_mutex_unlock(&myMutex);
 
 	}
 
 	return (void*)0;
-
 }
 
 void* supervisor(void* superID) {
@@ -147,14 +232,21 @@ void* supervisor(void* superID) {
 					continue;
 
 				}
+				else {
+
+					//Server has ran into an error
+					cout << "The server has encountered an error." << endl;
+					return (void*)0;
+
+				}
 			}
 
 		}
 
-		//If both for loops have finished with no breaking from the loops, sets gameOver to true
+		//If both for loops have finished with no breaking from the loops, sets filled to true
 		if (!broken) {
 
-			gameOver = true;
+			filled = true;
 
 		}
 
@@ -165,6 +257,10 @@ void* supervisor(void* superID) {
 }
 
 int main(int argc, char* argv[]) {
+
+	string ipAd = "127.0.0.1";
+
+	int timeout = 5;
 
 	if (argc == 2) {
 
@@ -197,33 +293,72 @@ int main(int argc, char* argv[]) {
 
 	}
 
-	pthread_create(&clients[0], 0, supervisor, (void*)(long)0);
+	//Prompt users to include an ini file name. Change ipAd as needed
 
-	for (int i = 1; i < (totalPlayers + 1); i++) {
+	const char* IP = ipAd.c_str();
 
-		while (true) {
+	int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+	if (serverSocket < 0) {
+		cout << "Error creating socket." << endl;
+		return -1;
+	}
 
-			//Once socket is found, change wait to false
+	struct sockaddr_in serverAddress {};
+	serverAddress.sin_family = AF_INET;
+	serverAddress.sin_addr.s_addr = inet_addr(IP);
+	serverAddress.sin_port = htons(PORT_NUMBER);
 
+	if (bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
+		cout << "Error binding socket." << endl;
+		return -1;
+	}
+
+	if (listen(serverSocket, 1) < 0) {
+		cout << "Error listening on socket." << endl;
+		return -1;
+	}
+
+	cout << "Server listening on port " << PORT_NUMBER << endl;
+
+	vector<pthread_t> threadIds;
+
+	pthread_t threadId;
+	pthread_create(&threadId, NULL, client, (void*)0);
+	threadIds.push_back(threadId);
+
+	while (true) {
+
+		struct sockaddr_in clientAddress {};
+		socklen_t clientAddressLength = sizeof(clientAddress);
+
+		// Accept an incoming client connection and create a client socket
+		int* clientSocket = (int*)malloc(sizeof(int));
+		*clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddress, &clientAddressLength);
+		if (*clientSocket < 0) {
+			std::cerr << "Error accepting connection." << std::endl;
+			break;
 		}
 
 		if (!filled) {
 
-			pthread_create(&clients[i], 0, reserveSeat, (void*)(long)i);
-			break;
+			pthread_create(&threadId, NULL, client, (void*)clientSocket);
+			threadIds.push_back(threadId);
+			continue;
 
 		} else {
-
-			//Close program
-
-		}
-
-		if (filled) {
 
 			break;
 
 		}
 
 	}
+
+	for (pthread_t threadId : threadIds) {
+		pthread_join(threadId, NULL);
+	}
+
+	close(serverSocket);
+
+	return 0;
 
 }
